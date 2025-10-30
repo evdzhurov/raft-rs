@@ -1,16 +1,21 @@
 use crate::{
-    messages::RequestVote,
+    messages::{AppendEntries, AppendEntriesReply, RequestVote, RequestVoteReply},
     server::{RequestError, Server},
 };
-use log::{error, info};
+use log::{error, info, warn};
 use std::time::{Duration, Instant};
+
+// Candidate -> periodically runs an election and gathers votes to become a leader.
+// Leader -> periodically sends heartbeats to followers.
+// Follower -> periodically runs an election if it doesn't hear from a leader.
+// Dead -> used for graceful shutdown, stops any periodic tasks.
 
 #[derive(Debug, PartialEq, Eq)]
 enum State {
-    // TODO: Unknown State?
-    Follower,
     Candidate,
     Leader,
+    Follower,
+    Dead,
 }
 
 struct Consensus<'a, S: Server + ?Sized> {
@@ -44,14 +49,15 @@ impl<'a, S: Server + ?Sized> Consensus<'a, S> {
 
         let mut votes_received = 1;
 
+        let req = RequestVote::new(saved_current_term, self.id);
+
         // Send RequestVote RPCs to all other servers concurrently
         for peer_id in self.peer_ids.iter().copied() {
             // TODO: Make a concurrent request
 
-            let req = RequestVote::new(saved_current_term, self.id);
-            let resp = self.server.call_request_vote(peer_id, &req);
+            let reply = self.server.call_request_vote(peer_id, &req);
 
-            match resp {
+            match reply {
                 Ok(reply) => {
                     info!("{} received RequestVoteReply {:?}", self.id, reply);
 
@@ -124,7 +130,113 @@ impl<'a, S: Server + ?Sized> Consensus<'a, S> {
         }
     }
 
-    fn become_follower(&self, term: i32) {}
+    fn start_leader(&mut self) {
+        self.state = State::Leader;
+        info!(
+            "{} becomes leader. term={} log=??",
+            self.id, self.current_term
+        );
 
-    fn start_leader(&self) {}
+        // TODO: Start sending periodic heartbeats to followers every 50ms (configure it)
+        // TODO: tick until leader
+        self.leader_send_heartbeats();
+    }
+
+    fn leader_send_heartbeats(&mut self) {
+        // TODO: Atomic load
+        let saved_current_term = self.current_term;
+
+        let req = AppendEntries::new(saved_current_term, self.id);
+
+        for peer_id in self.peer_ids.iter().copied() {
+            info!("{} sending append entries to {}", self.id, peer_id);
+
+            let reply = self.server.call_append_entries(peer_id, &req);
+
+            match reply {
+                Ok(reply) => {
+                    if reply.term > saved_current_term {
+                        info!("{} term out of date in heartbeat reply!", self.id);
+                        self.become_follower(reply.term);
+                        return;
+                    };
+                }
+                Err(err) => {
+                    error!("{} received error for heartbeat request!", self.id);
+                }
+            }
+        }
+    }
+
+    fn become_follower(&mut self, term: i32) {
+        // TODO: Critical region
+        info!("{} becomes follower with term={}, log=??", self.id, term);
+        self.state = State::Follower;
+        self.current_term = term;
+        self.voted_for = -1;
+        self.election_reset_event = Instant::now();
+
+        // A follower always runs the election timer in the background
+        // TODO: Run in background
+        self.run_election_timer();
+    }
+
+    fn on_request_vote(&mut self, req: &RequestVote) -> Option<RequestVoteReply> {
+        if self.state == State::Dead {
+            return None;
+        }
+
+        info!("{} received request vote {:?}", self.id, req);
+
+        if req.term > self.current_term {
+            info!("{} term out of date in request vote!", self.id);
+            self.become_follower(req.term);
+        }
+
+        let mut reply = RequestVoteReply::new(self.current_term);
+
+        if self.current_term == req.term
+            && (self.voted_for == -1 || self.voted_for == req.candidate_id)
+        {
+            reply.vote_granted = true;
+            self.voted_for = req.candidate_id;
+            self.election_reset_event = Instant::now();
+        }
+
+        info!("{} reply to request vote: {:?}", self.id, reply);
+
+        Some(reply)
+    }
+
+    fn on_append_entries(&mut self, req: &AppendEntries) -> Option<AppendEntriesReply> {
+        if self.state == State::Dead {
+            return None;
+        }
+
+        info!("{} received append entries {:?}", self.id, req);
+
+        if req.term > self.current_term {
+            info!("{} term out of date in append entries request!", self.id);
+            self.become_follower(req.term);
+        }
+
+        let mut reply = AppendEntriesReply::new(self.current_term);
+
+        if req.term == self.current_term {
+            // TODO: Same term but different leaders exist -> this one becomes a follower.
+            // But does it guarantee that only one leader exists?
+            // If two leaders back up from being a leader does it mean
+            // a new election will be forced?
+            if self.state != State::Follower {
+                self.become_follower(req.term);
+            }
+
+            self.election_reset_event = Instant::now();
+            reply.success = true;
+        }
+
+        info!("{} append entries reply: {:?}", self.id, reply);
+
+        Some(reply)
+    }
 }

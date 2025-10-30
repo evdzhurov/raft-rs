@@ -1,4 +1,4 @@
-use crate::messages::{RequestVote, RequestVoteReply};
+use crate::messages::{AppendEntries, AppendEntriesReply, RequestVote, RequestVoteReply};
 
 #[derive(Debug)]
 pub enum RequestError {
@@ -13,4 +13,10 @@ pub trait Server {
         peer: i32,
         req: &RequestVote,
     ) -> Result<RequestVoteReply, RequestError>;
+
+    fn call_append_entries(
+        &self,
+        peer: i32,
+        req: &AppendEntries,
+    ) -> Result<AppendEntriesReply, RequestError>;
 }
