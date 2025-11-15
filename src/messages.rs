@@ -11,9 +11,19 @@ pub struct RequestVoteReply {
 }
 
 #[derive(Debug)]
-pub struct AppendEntries {
+pub struct LogEntry {
+    pub cmd: Vec<u8>, // TODO: Alternatively could be Box<dyn Any + Send>
+    pub term: i32,
+}
+
+#[derive(Debug)]
+pub struct AppendEntries<'a> {
     pub term: i32,
     pub leader_id: i32,
+    pub last_log_idx: i32,
+    pub last_log_term: i32,
+    pub leader_commit_idx: i32,
+    pub entries: &'a [LogEntry],
 }
 
 #[derive(Debug)]

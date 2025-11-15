@@ -1,9 +1,12 @@
 use crate::{
-    messages::{AppendEntries, AppendEntriesReply, RequestVote, RequestVoteReply},
+    messages::{AppendEntries, AppendEntriesReply, LogEntry, RequestVote, RequestVoteReply},
     server::{RequestError, Server},
 };
 use log::{error, info, warn};
-use std::time::{Duration, Instant};
+use std::{
+    collections::HashMap,
+    time::{Duration, Instant},
+};
 
 // Candidate -> periodically runs an election and gathers votes to become a leader.
 // Leader -> periodically sends heartbeats to followers.
@@ -18,6 +21,17 @@ enum State {
     Dead,
 }
 
+#[derive(Debug)]
+struct CommitEntry {
+    cmd: Vec<u8>,
+    index: i32,
+    term: i32,
+}
+
+// TODO: CommitEntry's command needs to be send back to the caller after reaching consensus
+// so it can be applied to the replicated state
+// - Use callback function?
+
 struct Consensus<'a, S: Server + ?Sized> {
     server: &'a mut S,
     id: i32,
@@ -26,10 +40,26 @@ struct Consensus<'a, S: Server + ?Sized> {
     state: State,
     election_reset_event: Instant,
     voted_for: i32,
+    commit_idx: i32,
+    log: Vec<LogEntry>,
+    peer_next_idx: HashMap<i32, i32>,
 }
 
 impl<'a, S: Server + ?Sized> Consensus<'a, S> {
     // TODO: new
+
+    fn submit(&mut self, cmd: Vec<u8>) -> bool {
+        // TODO: Locking
+        if self.state == State::Leader {
+            self.log.push(LogEntry {
+                cmd: cmd,
+                term: self.current_term,
+            });
+            return true;
+        }
+
+        false
+    }
 
     fn start_election(&mut self) {
         // Start election by voting for self
@@ -146,10 +176,34 @@ impl<'a, S: Server + ?Sized> Consensus<'a, S> {
         // TODO: Atomic load
         let saved_current_term = self.current_term;
 
-        let req = AppendEntries::new(saved_current_term, self.id);
-
         for peer_id in self.peer_ids.iter().copied() {
             info!("{} sending append entries to {}", self.id, peer_id);
+
+            // TODO: Check why we include the 'prev_idx/term'
+            // in the AppendEntries request instead of the 'next'
+            // that each follower expects
+            let next_idx = self.peer_next_idx[&peer_id];
+            let prev_idx = next_idx - 1;
+            let prev_term = if prev_idx >= 0 {
+                self.log[prev_idx as usize].term
+            } else {
+                -1
+            };
+
+            let entries = if prev_idx >= 0 {
+                &self.log[prev_idx as usize..]
+            } else {
+                &self.log[..]
+            };
+
+            let req = AppendEntries {
+                term: saved_current_term,
+                leader_id: self.id,
+                last_log_idx: prev_idx,
+                last_log_term: prev_term,
+                entries: entries,
+                leader_commit_idx: self.commit_idx,
+            };
 
             let reply = self.server.call_append_entries(peer_id, &req);
 
@@ -160,9 +214,20 @@ impl<'a, S: Server + ?Sized> Consensus<'a, S> {
                         self.become_follower(reply.term);
                         return;
                     };
+
+                    if self.state == State::Leader && saved_current_term == reply.term {
+                        *self
+                            .peer_next_idx
+                            .get_mut(&peer_id)
+                            .expect("update existing peer_next_id") =
+                            next_idx + entries.len() as i32;
+                    }
                 }
                 Err(err) => {
-                    error!("{} received error for heartbeat request!", self.id);
+                    error!(
+                        "{} received error {:?} for heartbeat request!",
+                        self.id, err
+                    );
                 }
             }
         }
