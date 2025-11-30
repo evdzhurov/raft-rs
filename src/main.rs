@@ -1,5 +1,5 @@
 mod consensus;
-mod messages;
+mod rpc;
 mod server;
 fn main() {
     // TODO: logging backend initialization

@@ -1,5 +1,5 @@
 use crate::{
-    messages::{AppendEntries, AppendEntriesReply, LogEntry, RequestVote, RequestVoteReply},
+    rpc::{AppendEntries, AppendEntriesReply, LogEntry, RequestVote, RequestVoteReply},
     server::{RequestError, Server},
 };
 use log::{error, info, warn};
@@ -8,6 +8,29 @@ use std::{
     time::{Duration, Instant},
 };
 
+// Raft Sub-problems:
+// * Leader Election
+// * Log Replication
+// * State Machine Safety
+
+// Safety Properties:
+// ---------------------------------------------------------------------------------
+// * Election Safety - at most one leader can be elected in a given term.
+// ---------------------------------------------------------------------------------
+// * Leader Append-Only - a leader never overwrites or deletes entries in its log.
+// -------------------------------------------------------------------------------
+// * Log Matching - if two logs contain an entry with the same index and term, then
+// the two logs are identical in all entries up through the given index.
+// ---------------------------------------------------------------------------------
+// * Leader Completeness - if a log entry is committed in a given term then that
+// entry will be present in the logs of the leaders for all higher-numbered terms.
+// ---------------------------------------------------------------------------------
+// * State Machine Safety - if a server has applied a log entry at a given index
+// to its state machine, no other server will ever apply a different log entry
+// for the same index.
+// ---------------------------------------------------------------------------------
+
+// Server States:
 // Candidate -> periodically runs an election and gathers votes to become a leader.
 // Leader -> periodically sends heartbeats to followers.
 // Follower -> periodically runs an election if it doesn't hear from a leader.
@@ -79,7 +102,13 @@ impl<'a, S: Server + ?Sized> Consensus<'a, S> {
 
         let mut votes_received = 1;
 
-        let req = RequestVote::new(saved_current_term, self.id);
+        // TODO: last_log_idx and last_log_term are not yet filled in
+        let req = RequestVote {
+            term: saved_current_term,
+            candidate_id: self.id,
+            last_log_idx: 0,
+            last_log_term: 0,
+        };
 
         // Send RequestVote RPCs to all other servers concurrently
         for peer_id in self.peer_ids.iter().copied() {
@@ -173,7 +202,7 @@ impl<'a, S: Server + ?Sized> Consensus<'a, S> {
     }
 
     fn leader_send_heartbeats(&mut self) {
-        // TODO: Atomic load
+        // TODO: Synchronization
         let saved_current_term = self.current_term;
 
         for peer_id in self.peer_ids.iter().copied() {
@@ -199,8 +228,8 @@ impl<'a, S: Server + ?Sized> Consensus<'a, S> {
             let req = AppendEntries {
                 term: saved_current_term,
                 leader_id: self.id,
-                last_log_idx: prev_idx,
-                last_log_term: prev_term,
+                prev_log_idx: prev_idx,
+                prev_log_term: prev_term,
                 entries: entries,
                 leader_commit_idx: self.commit_idx,
             };
@@ -221,6 +250,10 @@ impl<'a, S: Server + ?Sized> Consensus<'a, S> {
                             .get_mut(&peer_id)
                             .expect("update existing peer_next_id") =
                             next_idx + entries.len() as i32;
+
+                        // TODO: what is self.match_index used for?
+
+                        // TODO: Check paper for Append Entries fields meaning
                     }
                 }
                 Err(err) => {
@@ -258,7 +291,10 @@ impl<'a, S: Server + ?Sized> Consensus<'a, S> {
             self.become_follower(req.term);
         }
 
-        let mut reply = RequestVoteReply::new(self.current_term);
+        let mut reply = RequestVoteReply {
+            term: self.current_term,
+            vote_granted: false,
+        };
 
         if self.current_term == req.term
             && (self.voted_for == -1 || self.voted_for == req.candidate_id)
@@ -285,7 +321,10 @@ impl<'a, S: Server + ?Sized> Consensus<'a, S> {
             self.become_follower(req.term);
         }
 
-        let mut reply = AppendEntriesReply::new(self.current_term);
+        let mut reply = AppendEntriesReply {
+            term: self.current_term,
+            success: false,
+        };
 
         if req.term == self.current_term {
             // TODO: Same term but different leaders exist -> this one becomes a follower.
@@ -297,7 +336,49 @@ impl<'a, S: Server + ?Sized> Consensus<'a, S> {
             }
 
             self.election_reset_event = Instant::now();
-            reply.success = true;
+
+            // A successful reply requires that prev_log_idx and prev_log_term exist
+            // or the request is trivially satisfied when prev_log_idx == -1
+            if req.prev_log_idx == -1
+                || ((req.prev_log_idx as usize) < self.log.len()
+                    && req.prev_log_term == self.log[req.prev_log_idx as usize].term)
+            {
+                reply.success = true;
+
+                // Find the insertion point for new log entries - where
+                // there's a term mismatch between existing log at prev_log_idx + 1 and
+                // new entries in the request
+
+                let mut log_insert_idx = (req.prev_log_idx + 1) as usize;
+                let mut new_entries_idx = 0_usize;
+
+                while log_insert_idx < self.log.len()
+                    && new_entries_idx < req.entries.len()
+                    && self.log[log_insert_idx].term == req.entries[new_entries_idx].term
+                {
+                    log_insert_idx += 1;
+                    new_entries_idx += 1;
+                }
+
+                // Postcondition:
+                // * log_insert_idx points at the end of the follower's log or an index where
+                // there's a mismatch for the term in leader's entry
+                // * new_entries_idx points at the end of entries or an index where the term
+                // in the follower's log entry does not correspond to the leader's.
+
+                if new_entries_idx < req.entries.len() {
+                    self.log.truncate(log_insert_idx); // Keep entries < log_insert_idx
+                    self.log.extend_from_slice(&req.entries[new_entries_idx..]);
+                }
+
+                if req.leader_commit_idx > self.commit_idx {
+                    // TODO: unsigned/signed conversion can cause large values of len to become negative
+                    self.commit_idx = req.leader_commit_idx.min(self.log.len() as i32 - 1);
+                    info!("{} setting commit index to {}!", self.id, self.commit_idx);
+
+                    // TODO: Signal that new committed entries are ready to be sent up to the client
+                }
+            }
         }
 
         info!("{} append entries reply: {:?}", self.id, reply);
