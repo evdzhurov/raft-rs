@@ -1,4 +1,5 @@
 mod consensus;
+mod node;
 mod rpc;
 mod server;
 fn main() {

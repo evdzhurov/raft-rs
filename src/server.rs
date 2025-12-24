@@ -6,6 +6,7 @@ pub enum RequestError {
     Generic,
 }
 
+// TODO: Change to RaftNode?
 pub trait Server {
     // TODO: Any way to make the call interface polymorphic? (Is it needed/worthy?)
     fn call_request_vote(
