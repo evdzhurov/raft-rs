@@ -1,8 +1,9 @@
 use crate::{
-    rpc::{AppendEntries, AppendEntriesReply, LogEntry, RequestVote, RequestVoteReply},
-    server::{RequestError, Server},
+    messages::{AppendEntries, AppendEntriesReply, LogEntry, RequestVote, RequestVoteReply},
+    server::Server,
+    sm::{Application, StateMachine},
 };
-use log::{error, info, warn};
+use log::{error, info};
 use std::{
     collections::HashMap,
     time::{Duration, Instant},
@@ -51,12 +52,9 @@ struct CommitEntry {
     term: i32,
 }
 
-// TODO: CommitEntry's command needs to be send back to the caller after reaching consensus
-// so it can be applied to the replicated state
-// - Use callback function?
-
-struct Consensus<'a, S: Server + ?Sized> {
-    server: &'a mut S,
+pub struct Consensus<'a> {
+    server: &'a mut dyn Server,
+    sm: &'a mut dyn StateMachine,
     id: i32,
     peer_ids: Vec<i32>,
     current_term: i32,
@@ -68,9 +66,7 @@ struct Consensus<'a, S: Server + ?Sized> {
     peer_next_idx: HashMap<i32, i32>,
 }
 
-impl<'a, S: Server + ?Sized> Consensus<'a, S> {
-    // TODO: new
-
+impl<'a> Consensus<'a> {
     fn submit(&mut self, cmd: Vec<u8>) -> bool {
         // TODO: Locking
         if self.state == State::Leader {

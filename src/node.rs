@@ -1,7 +1,14 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::{collections::HashMap, fs::File, io::BufReader};
+use tarpc::{client, context};
+use crate::consensus::Consensus;
 
-use crate::server::Server;
+use crate::sm::StateMachine;
+use crate::{
+    messages::{AppendEntries, AppendEntriesReply, RequestVote, RequestVoteReply},
+    rpc::{RaftRpc, RaftRpcClient},
+    server::Server,
+};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct Peer {
@@ -10,28 +17,67 @@ struct Peer {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
-struct ClusterConfig {
+pub struct ClusterConfig {
     peers: Vec<Peer>,
 }
 
-struct Node {
+pub struct Node<'a> {
     id: i32,
+    peers: HashMap<i32, RaftRpcClient>,
+    consensus: Consensus<'a>,
 }
 
-impl Server for Node {
+impl ClusterConfig {
+    pub fn from_file(path: &str) -> Result<ClusterConfig, Box<dyn std::error::Error>> {
+        let file = File::open(path)?;
+        let reader = BufReader::new(file);
+        let config: ClusterConfig = serde_json::from_reader(reader)?;
+        Ok(config)
+    }
+}
+
+impl<'a> Node<'a> {
+    pub async fn new(id: i32, config: ClusterConfig, sm: &'a dyn StateMachine) -> Node<'a> {
+        let mut peers: HashMap<i32, RaftRpcClient>;
+        let mut peer_ids: Vec<i32>;
+        for Peer { id: peer_id, addr } in &config.peers {
+            if peer_id == &id {
+                continue;
+            }
+            let transport = tarpc::serde_transport::tcp::connect(addr, Json::default);
+            peers[peer_id] = RaftRpcClient::new(client::Config::default(), transport.await).spawn();
+            peer_ids.append(peer_id);
+        }
+
+        let consensus = Consensus::new(id, peer_ids);
+
+        Self { id, peers, Consensus::new() }
+    }
+}
+
+impl<'a> Server for Node<'a> {
     fn call_request_vote(
         &self,
         peer: i32,
-        req: &crate::rpc::RequestVote,
-    ) -> Result<crate::rpc::RequestVoteReply, crate::server::RequestError> {
+        req: &crate::messages::RequestVote,
+    ) -> Result<crate::messages::RequestVoteReply, crate::server::RequestError> {
         todo!()
     }
 
     fn call_append_entries(
         &self,
         peer: i32,
-        req: &crate::rpc::AppendEntries,
-    ) -> Result<crate::rpc::AppendEntriesReply, crate::server::RequestError> {
+        req: &crate::messages::AppendEntries,
+    ) -> Result<crate::messages::AppendEntriesReply, crate::server::RequestError> {
+        todo!()
+    }
+}
+
+impl<'a> RaftRpc for Node<'a> {
+    async fn request_vote(self, _: context::Context, req: RequestVote) -> RequestVoteReply {
+        todo!();
+    }
+    async fn append_entries(self, _: context::Context, req: AppendEntries) -> AppendEntriesReply {
         todo!()
     }
 }

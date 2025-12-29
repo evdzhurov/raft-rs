@@ -1,4 +1,4 @@
-use crate::rpc::{AppendEntries, AppendEntriesReply, RequestVote, RequestVoteReply};
+use crate::messages::{AppendEntries, AppendEntriesReply, RequestVote, RequestVoteReply};
 
 #[derive(Debug)]
 pub enum RequestError {
