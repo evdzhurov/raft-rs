@@ -3,24 +3,22 @@
 ```mermaid
 sequenceDiagram
     participant PeerA as Peer A
-    participant transport as serde_transport::tcp
-    participant BC as tarpc::BaseChannel
-    participant Node as Node (impl RaftRpc)
+    participant transport as serde_transport::tcp<br/>(tarpc)
+    participant Node as Node (impl RaftRpc)<br/>(tarpc)
     participant Consensus
     participant ServerImpl as Node (impl Server)
-    participant Client as RaftRpcClient
-    participant transport_out as serde_transport::tcp
+    participant Client as RaftRpcClient<br/>(tarpc)
+    participant transport_out as serde_transport::tcp<br/>(tarpc)
     participant PeerB as Peer B
+
 
     rect rgb(227, 239, 255)
         Note over PeerA, Consensus: Inbound call
         PeerA  ->>  transport: TCP bytes
-        transport ->> BC: deserialize (serde)
-        BC ->> Node: dispatch request_vote / append_entries
+        transport ->> Node: deserialize (serde) + dispatch
         Node ->> Consensus: on_request_vote / on_append_entries
         Consensus -->> Node: reply
-        Node -->> BC: reply
-        BC -->> transport: serialize (serde)
+        Node -->> transport: serialize (serde)
         transport -->> PeerA: TCP bytes
     end
 
