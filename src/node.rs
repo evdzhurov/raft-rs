@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, fs::File, io::BufReader};
 use tarpc::{client, context};
-use crate::consensus::Consensus;
 
+use crate::consensus::Consensus;
 use crate::sm::StateMachine;
 use crate::{
     messages::{AppendEntries, AppendEntriesReply, RequestVote, RequestVoteReply},
@@ -36,22 +36,31 @@ impl ClusterConfig {
     }
 }
 
+// TODO: Remove Node, it's a self-referential struct and instead of new can be represented as an entry-point function
 impl<'a> Node<'a> {
     pub async fn new(id: i32, config: ClusterConfig, sm: &'a dyn StateMachine) -> Node<'a> {
         let mut peers: HashMap<i32, RaftRpcClient>;
         let mut peer_ids: Vec<i32>;
+
         for Peer { id: peer_id, addr } in &config.peers {
             if peer_id == &id {
                 continue;
             }
-            let transport = tarpc::serde_transport::tcp::connect(addr, Json::default);
-            peers[peer_id] = RaftRpcClient::new(client::Config::default(), transport.await).spawn();
-            peer_ids.append(peer_id);
+            let transport =
+                tarpc::serde_transport::tcp::connect(addr, tokio_serde::formats::Json::default)
+                    .await
+                    .unwrap();
+            peers[peer_id] = RaftRpcClient::new(client::Config::default(), transport).spawn();
+            peer_ids.push(*peer_id);
         }
 
-        let consensus = Consensus::new(id, peer_ids);
+        let consensus = Consensus::new(id, peer_ids, sm);
 
-        Self { id, peers, Consensus::new() }
+        Self {
+            id,
+            peers,
+            consensus,
+        }
     }
 }
 

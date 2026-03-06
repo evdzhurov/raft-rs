@@ -3,11 +3,13 @@ use crate::{
     server::Server,
     sm::{Application, StateMachine},
 };
-use log::{error, info};
+use log::{Log, error, info};
 use std::{
     collections::HashMap,
+    hash::Hash,
     time::{Duration, Instant},
 };
+use tarpc::client::new;
 
 // Raft Sub-problems:
 // * Leader Election
@@ -53,9 +55,9 @@ struct CommitEntry {
 }
 
 pub struct Consensus<'a> {
-    server: &'a mut dyn Server,
-    sm: &'a mut dyn StateMachine,
     id: i32,
+    server: &'a dyn Server,
+    sm: &'a dyn StateMachine,
     peer_ids: Vec<i32>,
     current_term: i32,
     state: State,
@@ -67,6 +69,22 @@ pub struct Consensus<'a> {
 }
 
 impl<'a> Consensus<'a> {
+    fn new(id: i32, peer_ids: Vec<i32>, server: &'a dyn Server, sm: &'a dyn StateMachine) -> Self {
+        Self {
+            id: id,
+            server: server,
+            sm: sm,
+            peer_ids: peer_ids,
+            current_term: 0,
+            state: State::Follower,
+            election_reset_event: Instant::now(),
+            voted_for: 0,
+            commit_idx: 0,
+            log: Vec::new(),
+            peer_next_idx: HashMap::new(),
+        }
+    }
+
     fn submit(&mut self, cmd: Vec<u8>) -> bool {
         // TODO: Locking
         if self.state == State::Leader {
